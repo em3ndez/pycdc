@@ -18,6 +18,7 @@ void PycInt::load(PycData* stream, PycModule*)
 void PycLong::load(PycData* stream, PycModule*)
 {
     if (type() == TYPE_INT64) {
+        m_value.reserve(4);
         int lo = stream->get32();
         int hi = stream->get32();
         m_value.push_back((lo      ) & 0xFFFF);
@@ -28,6 +29,7 @@ void PycLong::load(PycData* stream, PycModule*)
     } else {
         m_size = stream->get32();
         int actualSize = m_size >= 0 ? m_size : -m_size;
+        m_value.reserve(actualSize);
         for (int i=0; i<actualSize; i++)
             m_value.push_back(stream->get16());
     }
@@ -41,9 +43,9 @@ bool PycLong::isEqual(PycRef<PycObject> obj) const
     PycRef<PycLong> longObj = obj.cast<PycLong>();
     if (m_size != longObj->m_size)
         return false;
-    std::list<int>::const_iterator it1 = m_value.begin();
-    std::list<int>::const_iterator it2 = longObj->m_value.begin();
-    while (it1 != m_value.end()) {
+    auto it1 = m_value.cbegin();
+    auto it2 = longObj->m_value.cbegin();
+    while (it1 != m_value.cend()) {
         if (*it1 != *it2)
             return false;
         ++it1, ++it2;
@@ -51,16 +53,17 @@ bool PycLong::isEqual(PycRef<PycObject> obj) const
     return true;
 }
 
-std::string PycLong::repr() const
+std::string PycLong::repr(PycModule* mod) const
 {
     // Longs are printed as hex, since it's easier (and faster) to convert
     // arbitrary-length integers to a power of two than an arbitrary base
 
     if (m_size == 0)
-        return "0x0L";
+        return (mod->verCompare(3, 0) >= 0) ? "0x0" : "0x0L";
 
     // Realign to 32 bits, since Python uses only 15
-    std::list<unsigned> bits;
+    std::vector<unsigned> bits;
+    bits.reserve((m_value.size() + 1) / 2);
     int shift = 0, temp = 0;
     for (auto bit : m_value) {
         temp |= unsigned(bit & 0xFFFF) << shift;
@@ -83,11 +86,12 @@ std::string PycLong::repr() const
     *aptr++ = '0';
     *aptr++ = 'x';
 
-    std::list<unsigned>::const_reverse_iterator iter = bits.rbegin();
+    auto iter = bits.crbegin();
     aptr += snprintf(aptr, 9, "%X", *iter++);
     while (iter != bits.rend())
         aptr += snprintf(aptr, 9, "%08X", *iter++);
-    *aptr++ = 'L';
+    if (mod->verCompare(3, 0) < 0)
+        *aptr++ = 'L';
     *aptr = 0;
     return accum;
 }

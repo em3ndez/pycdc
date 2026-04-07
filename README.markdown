@@ -26,7 +26,8 @@ https://github.com/zrax/pycdc
 * Build the generated project or makefile
   * For projects (e.g. MSVC), open the generated project file and build it
   * For makefiles, just run `make`
-  * To run tests (on \*nix or MSYS), run `make check`
+  * To run tests (on \*nix or MSYS), run `make check JOBS=4` (optional
+    `FILTER=xxxx` to run only certain tests)
 
 ## Usage
 **To run pycdas**, the PYC Disassembler:
@@ -37,6 +38,11 @@ The byte-code disassembly is printed to stdout.
 `./pycdc [PATH TO PYC FILE]`
 The decompiled Python source is printed to stdout.
 Any errors are printed to stderr.
+
+**Marshalled code objects**:
+Both tools support Python marshalled code objects, as output from `marshal.dumps(compile(...))`.
+
+To use this feature, specify `-c -v <version>` on the command line - the version must be specified as the objects themselves do not contain version metadata.
 
 ## Authors, Licence, Credits
 Decompyle++ is the work of Michael Hansen and Darryl Pogue.

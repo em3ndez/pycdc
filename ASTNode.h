@@ -3,6 +3,7 @@
 
 #include "pyc_module.h"
 #include <list>
+#include <deque>
 
 /* Similar interface to PycObject, so PycRef can work on it... *
  * However, this does *NOT* mean the two are interchangeable!  */
@@ -12,11 +13,12 @@ public:
         NODE_INVALID, NODE_NODELIST, NODE_OBJECT, NODE_UNARY, NODE_BINARY,
         NODE_COMPARE, NODE_SLICE, NODE_STORE, NODE_RETURN, NODE_NAME,
         NODE_DELETE, NODE_FUNCTION, NODE_CLASS, NODE_CALL, NODE_IMPORT,
-        NODE_TUPLE, NODE_LIST, NODE_MAP, NODE_SUBSCR, NODE_PRINT,
+        NODE_TUPLE, NODE_LIST, NODE_SET, NODE_MAP, NODE_SUBSCR, NODE_PRINT,
         NODE_CONVERT, NODE_KEYWORD, NODE_RAISE, NODE_EXEC, NODE_BLOCK,
         NODE_COMPREHENSION, NODE_LOADBUILDCLASS, NODE_AWAITABLE,
         NODE_FORMATTEDVALUE, NODE_JOINEDSTR, NODE_CONST_MAP,
-        NODE_ANNOTATED_VAR, NODE_CHAINSTORE,
+        NODE_ANNOTATED_VAR, NODE_CHAINSTORE, NODE_TERNARY,
+        NODE_KW_NAMES_MAP,
 
         // Empty node types
         NODE_LOCALS,
@@ -128,13 +130,15 @@ private:
 class ASTBinary : public ASTNode {
 public:
     enum BinOp {
-        BIN_ATTR, BIN_POWER, BIN_MULTIPLY, BIN_DIVIDE, BIN_FLOOR, BIN_MODULO,
-        BIN_ADD, BIN_SUBTRACT, BIN_LSHIFT, BIN_RSHIFT, BIN_AND, BIN_XOR,
-        BIN_OR, BIN_LOG_AND, BIN_LOG_OR, BIN_MAT_MULTIPLY,
+        BIN_ATTR, BIN_POWER, BIN_MULTIPLY, BIN_DIVIDE, BIN_FLOOR_DIVIDE,
+        BIN_MODULO, BIN_ADD, BIN_SUBTRACT, BIN_LSHIFT, BIN_RSHIFT, BIN_AND,
+        BIN_XOR, BIN_OR, BIN_LOG_AND, BIN_LOG_OR, BIN_MAT_MULTIPLY,
         /* Inplace operations */
         BIN_IP_ADD, BIN_IP_SUBTRACT, BIN_IP_MULTIPLY, BIN_IP_DIVIDE,
         BIN_IP_MODULO, BIN_IP_POWER, BIN_IP_LSHIFT, BIN_IP_RSHIFT, BIN_IP_AND,
-        BIN_IP_XOR, BIN_IP_OR, BIN_IP_FLOOR, BIN_IP_MAT_MULTIPLY,
+        BIN_IP_XOR, BIN_IP_OR, BIN_IP_FLOOR_DIVIDE, BIN_IP_MAT_MULTIPLY,
+        /* Error Case */
+        BIN_INVALID
     };
 
     ASTBinary(PycRef<ASTNode> left, PycRef<ASTNode> right, int op,
@@ -146,6 +150,9 @@ public:
     int op() const { return m_op; }
     bool is_inplace() const { return m_op >= BIN_IP_ADD; }
     virtual const char* op_str() const;
+
+    static BinOp from_opcode(int opcode);
+    static BinOp from_binary_op(int operand);
 
 protected:
     int m_op;
@@ -358,12 +365,41 @@ private:
     value_t m_values;
 };
 
+class ASTSet : public ASTNode {
+public:
+    typedef std::deque<PycRef<ASTNode>> value_t;
+
+    ASTSet(value_t values)
+        : ASTNode(NODE_SET), m_values(std::move(values)) { }
+
+    const value_t& values() const { return m_values; }
+
+private:
+    value_t m_values;
+};
 
 class ASTMap : public ASTNode {
 public:
     typedef std::list<std::pair<PycRef<ASTNode>, PycRef<ASTNode>>> map_t;
 
     ASTMap() : ASTNode(NODE_MAP) { }
+
+    void add(PycRef<ASTNode> key, PycRef<ASTNode> value)
+    {
+        m_values.emplace_back(std::move(key), std::move(value));
+    }
+
+    const map_t& values() const { return m_values; }
+
+private:
+    map_t m_values;
+};
+
+class ASTKwNamesMap : public ASTNode {
+public:
+    typedef std::list<std::pair<PycRef<ASTNode>, PycRef<ASTNode>>> map_t;
+
+    ASTKwNamesMap() : ASTNode(NODE_KW_NAMES_MAP) { }
 
     void add(PycRef<ASTNode> key, PycRef<ASTNode> value)
     {
@@ -550,13 +586,14 @@ private:
 
 class ASTIterBlock : public ASTBlock {
 public:
-    ASTIterBlock(ASTBlock::BlkType blktype, int end, PycRef<ASTNode> iter)
-        : ASTBlock(blktype, end), m_iter(std::move(iter)), m_idx(), m_comp() { }
+    ASTIterBlock(ASTBlock::BlkType blktype, int start, int end, PycRef<ASTNode> iter)
+        : ASTBlock(blktype, end), m_iter(std::move(iter)), m_idx(), m_comp(), m_start(start) { }
 
     PycRef<ASTNode> iter() const { return m_iter; }
     PycRef<ASTNode> index() const { return m_idx; }
     PycRef<ASTNode> condition() const { return m_cond; }
     bool isComprehension() const { return m_comp; }
+    int start() const { return m_start; }
 
     void setIndex(PycRef<ASTNode> idx) { m_idx = std::move(idx); init(); }
     void setCondition(PycRef<ASTNode> cond) { m_cond = std::move(cond); }
@@ -567,6 +604,7 @@ private:
     PycRef<ASTNode> m_idx;
     PycRef<ASTNode> m_cond;
     bool m_comp;
+    int m_start;
 };
 
 class ASTContainerBlock : public ASTBlock {
@@ -651,7 +689,9 @@ public:
         STR = 1,
         REPR = 2,
         ASCII = 3,
-        FMTSPEC = 4
+        CONVERSION_MASK = 0x03,
+
+        HAVE_FMT_SPEC = 4,
     };
 
     ASTFormattedValue(PycRef<ASTNode> val, ConversionFlag conversion,
@@ -691,12 +731,30 @@ public:
     ASTAnnotatedVar(PycRef<ASTNode> name, PycRef<ASTNode> type)
         : ASTNode(NODE_ANNOTATED_VAR), m_name(std::move(name)), m_type(std::move(type)) { }
 
-    const PycRef<ASTNode> name() const { return m_name; }
-    const PycRef<ASTNode> type() const { return m_type; }
+    PycRef<ASTNode> name() const noexcept { return m_name; }
+    PycRef<ASTNode> annotation() const noexcept { return m_type; }
 
 private:
     PycRef<ASTNode> m_name;
     PycRef<ASTNode> m_type;
+};
+
+class ASTTernary : public ASTNode
+{
+public:
+    ASTTernary(PycRef<ASTNode> if_block, PycRef<ASTNode> if_expr,
+               PycRef<ASTNode> else_expr)
+        : ASTNode(NODE_TERNARY), m_if_block(std::move(if_block)),
+          m_if_expr(std::move(if_expr)), m_else_expr(std::move(else_expr)) { }
+
+    PycRef<ASTNode> if_block() const noexcept { return m_if_block; }
+    PycRef<ASTNode> if_expr() const noexcept { return m_if_expr; }
+    PycRef<ASTNode> else_expr() const noexcept { return m_else_expr; }
+
+private:
+    PycRef<ASTNode> m_if_block; // contains "condition" and "negative"
+    PycRef<ASTNode> m_if_expr;
+    PycRef<ASTNode> m_else_expr;
 };
 
 #endif

@@ -2,6 +2,7 @@
 #define _PYC_FILE_H
 
 #include <cstdio>
+#include <ostream>
 
 #ifdef WIN32
 typedef __int64 Pyc_INT64;
@@ -18,7 +19,7 @@ public:
     virtual bool atEof() const = 0;
 
     virtual int getByte() = 0;
-    virtual int getBuffer(int bytes, void* buffer) = 0;
+    virtual void getBuffer(int bytes, void* buffer) = 0;
     int get16();
     int get32();
     Pyc_INT64 get64();
@@ -33,7 +34,7 @@ public:
     bool atEof() const override;
 
     int getByte() override;
-    int getBuffer(int bytes, void* buffer) override;
+    void getBuffer(int bytes, void* buffer) override;
 
 private:
     FILE* m_stream;
@@ -49,13 +50,14 @@ public:
     bool atEof() const override { return (m_pos == m_size); }
 
     int getByte() override;
-    int getBuffer(int bytes, void* buffer) override;
+    void getBuffer(int bytes, void* buffer) override;
 
 private:
     const unsigned char* m_buffer;
     int m_size, m_pos;
 };
 
-extern FILE* pyc_output;
+int formatted_print(std::ostream& stream, const char* format, ...);
+int formatted_printv(std::ostream& stream, const char* format, va_list args);
 
 #endif

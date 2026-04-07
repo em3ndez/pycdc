@@ -1,46 +1,17 @@
 #include "pyc_string.h"
 #include "pyc_module.h"
 #include "data.h"
-#include <cstring>
-#include <limits>
+#include <stdexcept>
 
-static void ascii_to_utf8(std::string* data)
+static bool check_ascii(const std::string& data)
 {
-    size_t utf8len = 0, asciilen = 0;
-    auto cp = reinterpret_cast<const unsigned char*>(data->c_str());
+    auto cp = reinterpret_cast<const unsigned char*>(data.c_str());
     while (*cp) {
         if (*cp & 0x80)
-            utf8len += 2;
-        else
-            utf8len += 1;
-
-        // Advance ASCII pointer
-        ++asciilen;
+            return false;
         ++cp;
     }
-
-    if (asciilen == utf8len) {
-        // This can only happen if all characters are [0x00-0x7f].
-        // If that happens, we don't need to do any conversion, nor
-        // reallocate any buffers.  Woot!
-        return;
-    }
-
-    std::string utf8_buffer;
-    utf8_buffer.resize(utf8len);
-    auto up = reinterpret_cast<unsigned char*>(&utf8_buffer.front());
-    cp = reinterpret_cast<const unsigned char*>(data->c_str());
-    while (*cp) {
-        if (*cp & 0x80) {
-            *up++ = 0xC0 | ((*cp >> 6) & 0x1F);
-            *up++ = 0x80 | ((*cp     ) & 0x3F);
-        } else {
-            *up++ = *cp;
-        }
-        ++cp;
-    }
-
-    *data = std::move(utf8_buffer);
+    return true;
 }
 
 /* PycString */
@@ -48,10 +19,8 @@ void PycString::load(PycData* stream, PycModule* mod)
 {
     if (type() == TYPE_STRINGREF) {
         PycRef<PycString> str = mod->getIntern(stream->get32());
-        m_value.resize(str->length());
-
-        if (str->length())
-            std::char_traits<char>::copy(&m_value.front(), str->value(), str->length());
+        m_type = str->m_type;
+        m_value = str->m_value;
     } else {
         int length;
         if (type() == TYPE_SHORT_ASCII || type() == TYPE_SHORT_ASCII_INTERNED)
@@ -66,8 +35,10 @@ void PycString::load(PycData* stream, PycModule* mod)
         if (length) {
             stream->getBuffer(length, &m_value.front());
             if (type() == TYPE_ASCII || type() == TYPE_ASCII_INTERNED ||
-                    type() == TYPE_SHORT_ASCII || type() == TYPE_SHORT_ASCII_INTERNED)
-                ascii_to_utf8(&m_value);
+                    type() == TYPE_SHORT_ASCII || type() == TYPE_SHORT_ASCII_INTERNED) {
+                if (!check_ascii(m_value))
+                    throw std::runtime_error("Invalid bytes in ASCII string");
+            }
         }
 
         if (type() == TYPE_INTERNED || type() == TYPE_ASCII_INTERNED ||
@@ -85,84 +56,101 @@ bool PycString::isEqual(PycRef<PycObject> obj) const
     return isEqual(strObj->m_value);
 }
 
-void OutputString(PycRef<PycString> str, char prefix, bool triple, FILE* F, const char* parent_f_string_quote)
+void PycString::print(std::ostream &pyc_output, PycModule* mod, bool triple,
+                      const char* parent_f_string_quote)
 {
-    if (prefix != 0)
-        fputc(prefix, F);
+    char prefix = 0;
+    switch (type()) {
+    case TYPE_STRING:
+        prefix = mod->strIsUnicode() ? 'b' : 0;
+        break;
+    case PycObject::TYPE_UNICODE:
+        prefix = mod->strIsUnicode() ? 0 : 'u';
+        break;
+    case PycObject::TYPE_INTERNED:
+        prefix = mod->internIsBytes() ? 'b' : 0;
+        break;
+    case PycObject::TYPE_ASCII:
+    case PycObject::TYPE_ASCII_INTERNED:
+    case PycObject::TYPE_SHORT_ASCII:
+    case PycObject::TYPE_SHORT_ASCII_INTERNED:
+        // These types don't exist until Python 3.4
+        prefix = 0;
+        break;
+    default:
+        throw std::runtime_error("Invalid string type");
+    }
 
-    const char* ch = str->value();
-    int len = str->length();
-    if (ch == 0) {
-        fputs("''", F);
+    if (prefix != 0)
+        pyc_output << prefix;
+
+    if (m_value.empty()) {
+        pyc_output << "''";
         return;
     }
 
     // Determine preferred quote style (Emulate Python's method)
     bool useQuotes = false;
     if (!parent_f_string_quote) {
-        while (len--) {
-            if (*ch == '\'') {
+        for (char ch : m_value) {
+            if (ch == '\'') {
                 useQuotes = true;
-            } else if (*ch == '"') {
+            } else if (ch == '"') {
                 useQuotes = false;
                 break;
             }
-            ch++;
         }
     } else {
         useQuotes = parent_f_string_quote[0] == '"';
     }
-    ch = str->value();
-    len = str->length();
 
     // Output the string
     if (!parent_f_string_quote) {
         if (triple)
-            fputs(useQuotes ? "\"\"\"" : "'''", F);
+            pyc_output << (useQuotes ? R"(""")" : "'''");
         else
-            fputc(useQuotes ? '"' : '\'', F);
+            pyc_output << (useQuotes ? '"' : '\'');
     }
-    while (len--) {
-        if (*ch < 0x20 || *ch == 0x7F) {
-            if (*ch == '\r') {
-                fputs("\\r", F);
-            } else if (*ch == '\n') {
+    for (char ch : m_value) {
+        if (static_cast<unsigned char>(ch) < 0x20 || ch == 0x7F) {
+            if (ch == '\r') {
+                pyc_output << "\\r";
+            } else if (ch == '\n') {
                 if (triple)
-                    fputc('\n', F);
+                    pyc_output << '\n';
                 else
-                    fputs("\\n", F);
-            } else if (*ch == '\t') {
-                fputs("\\t", F);
+                    pyc_output << "\\n";
+            } else if (ch == '\t') {
+                pyc_output << "\\t";
             } else {
-                fprintf(F, "\\x%02x", (*ch & 0xFF));
+                formatted_print(pyc_output, "\\x%02x", (ch & 0xFF));
             }
-        } else if ((unsigned char)(*ch) >= 0x80) {
-            if (str->type() == PycObject::TYPE_UNICODE) {
+        } else if (static_cast<unsigned char>(ch) >= 0x80) {
+            if (type() == TYPE_UNICODE) {
                 // Unicode stored as UTF-8...  Let the stream interpret it
-                fputc(*ch, F);
+                pyc_output << ch;
             } else {
-                fprintf(F, "\\x%x", (*ch & 0xFF));
+                formatted_print(pyc_output, "\\x%02x", (ch & 0xFF));
             }
         } else {
-            if (!useQuotes && *ch == '\'')
-                fputs("\\'", F);
-            else if (useQuotes && *ch == '"')
-                fputs("\\\"", F);
-            else if (*ch == '\\')
-                fputs("\\\\", F);
-            else if (parent_f_string_quote && *ch == '{')
-                fputs("{{", F);
-            else if (parent_f_string_quote && *ch == '}')
-                fputs("}}", F);
+            if (!useQuotes && ch == '\'')
+                pyc_output << R"(\')";
+            else if (useQuotes && ch == '"')
+                pyc_output << R"(\")";
+            else if (ch == '\\')
+                pyc_output << R"(\\)";
+            else if (parent_f_string_quote && ch == '{')
+                pyc_output << "{{";
+            else if (parent_f_string_quote && ch == '}')
+                pyc_output << "}}";
             else
-                fputc(*ch, F);
+                pyc_output << ch;
         }
-        ch++;
     }
     if (!parent_f_string_quote) {
         if (triple)
-            fputs(useQuotes ? "\"\"\"" : "'''", F);
+            pyc_output << (useQuotes ? R"(""")" : "'''");
         else
-            fputc(useQuotes ? '"' : '\'', F);
+            pyc_output << (useQuotes ? '"' : '\'');
     }
 }
